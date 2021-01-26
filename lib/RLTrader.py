@@ -180,7 +180,7 @@ class RLTrader:
             last_reward = np.mean(rewards)
             trial.report(-1 * last_reward, eval_idx)
 
-            if trial.should_prune(eval_idx):
+            if trial.should_prune():
                 raise optuna.structs.TrialPruned()
 
         return -1 * last_reward
