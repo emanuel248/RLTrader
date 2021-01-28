@@ -111,9 +111,9 @@ def optimize_agent(trial):
         rewards = []
         n_episodes, reward_sum = 0, 0.0
 
-        trades = train_env.get_attr('trades')
-        if len(trades) < 1:
-            raise optuna.structs.TrialPruned()
+        # trades = train_env.get_attr('trades')
+        # if len(trades) < 1:
+        #    raise optuna.structs.TrialPruned()
 
         obs = test_env.reset()
         step_cnt = 0
@@ -135,18 +135,20 @@ def optimize_agent(trial):
                 obs = test_env.reset()
             step_cnt = step_cnt + 1
 
-        last_reward = np.mean(rewards)
-        trial.report(-1 * last_reward, eval_idx)
+            trial.report(-1 * last_reward, step_cnt)
+            if trial.should_prune():
+                raise optuna.structs.TrialPruned()
 
-        if trial.should_prune():
-            raise optuna.structs.TrialPruned()
+        last_reward = np.mean(rewards)
+
 
     return -1 * last_reward
 
 
 def optimize():
     study = optuna.create_study(
-        study_name='ppo2_sortino', storage='sqlite:///params.db', load_if_exists=True)
+        study_name='ppo2_sortino', storage='sqlite:///params.db', load_if_exists=True,
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=32, interval_steps=16))
 
     try:
         study.optimize(optimize_agent, n_trials=n_trials, n_jobs=1, show_progress_bar=False)
