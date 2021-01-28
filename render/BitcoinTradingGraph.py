@@ -6,9 +6,11 @@ import matplotlib.pyplot as plt
 from matplotlib import style
 from datetime import datetime
 from pandas.plotting import register_matplotlib_converters
+import matplotlib.ticker as mticker
 
 style.use('ggplot')
 register_matplotlib_converters()
+matplotlib.use('tkagg')
 
 VOLUME_CHART_HEIGHT = 0.33
 
@@ -41,7 +43,7 @@ class BitcoinTradingGraph:
                             right=0.90, top=0.90, wspace=0.2, hspace=0)
 
         # Show the graph without blocking the rest of the program
-        plt.show(block=False)
+        # plt.show(block=False)
 
     def _render_net_worth(self, step_range, dates, current_step, net_worths, benchmarks):
         # Clear the frame rendered last step
@@ -152,6 +154,8 @@ class BitcoinTradingGraph:
 
         date_labels = self.df['Date'].values[step_range]
 
+        #ticks_loc = self.price_ax.get_xticks().tolist()
+        #self.price_ax.xaxis.set_major_locator(mticker.FixedLocator(ticks_loc))
         self.price_ax.set_xticklabels(
             date_labels, rotation=45, horizontalalignment='right')
 
@@ -159,7 +163,7 @@ class BitcoinTradingGraph:
         plt.setp(self.net_worth_ax.get_xticklabels(), visible=False)
 
         # Necessary to view frames before they are unrendered
-        plt.pause(0.001)
+        # plt.pause(0.001)
 
     def close(self):
         plt.close()

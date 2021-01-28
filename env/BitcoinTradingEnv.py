@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from numpy import inf
 from gym import spaces
+from datetime import datetime
 from sklearn import preprocessing
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from empyrical import sortino_ratio, calmar_ratio, omega_ratio
@@ -15,7 +16,7 @@ from util.indicators import add_indicators
 
 class BitcoinTradingEnv(gym.Env):
     '''A Bitcoin trading environment for OpenAI gym'''
-    metadata = {'render.modes': ['human', 'system', 'none']}
+    metadata = {'render.modes': ['human', 'system', 'rgb_array', 'none']}
     viewer = None
 
     def __init__(self, df, initial_balance=10000, commission=0.0025, reward_func='sortino', **kwargs):
@@ -44,10 +45,12 @@ class BitcoinTradingEnv(gym.Env):
             }
         ]
 
-        self.forecast_len = kwargs.get('forecast_len', 10)
+        #self.forecast_len = kwargs.get('forecast_len', 10)
+        self.forecast_len = kwargs.get('forecast_len', 0)
         self.confidence_interval = kwargs.get('confidence_interval', 0.95)
-        self.obs_shape = (1, 5 + len(self.df.columns) -
-                          2 + (self.forecast_len * 3))
+        #self.obs_shape = (1, 5 + len(self.df.columns) -
+        #                  2 + (self.forecast_len * 3))
+        self.obs_shape = (1, 5 + len(self.df.columns) - 2)
 
         # Actions of the format Buy 1/4, Sell 3/4, Hold (amount ignored), etc.
         self.action_space = spaces.Discrete(12)
@@ -55,6 +58,7 @@ class BitcoinTradingEnv(gym.Env):
         # Observes the price action, indicators, account action, price forecasts
         self.observation_space = spaces.Box(
             low=0, high=1, shape=self.obs_shape, dtype=np.float16)
+        self.trades = []
 
     def _next_observation(self):
         scaler = preprocessing.MinMaxScaler()
@@ -69,21 +73,20 @@ class BitcoinTradingEnv(gym.Env):
 
         obs = scaled.values[-1]
 
-        past_df = self.stationary_df['Close'][:
-                                              self.current_step + self.forecast_len + 1]
-        forecast_model = SARIMAX(past_df.values, enforce_stationarity=False)
-        model_fit = forecast_model.fit(method='bfgs', disp=False)
-        forecast = model_fit.get_forecast(
-            steps=self.forecast_len, alpha=(1 - self.confidence_interval))
+        #past_df = self.stationary_df['Close'][:
+        #                                      self.current_step + self.forecast_len + 1]
+        #forecast_model = SARIMAX(past_df.values, enforce_stationarity=False, enforce_invertibility=False, simple_differencing = True)
+        #model_fit = forecast_model.fit(method='bfgs', disp=False)
+        #forecast = model_fit.get_forecast(
+        #    steps=self.forecast_len, alpha=(1 - self.confidence_interval))
 
-        obs = np.insert(obs, len(obs), forecast.predicted_mean, axis=0)
-        obs = np.insert(obs, len(obs), forecast.conf_int().flatten(), axis=0)
+        #obs = np.insert(obs, len(obs), forecast.predicted_mean, axis=0)
+        #obs = np.insert(obs, len(obs), forecast.conf_int().flatten(), axis=0)
 
         scaled_history = scaler.fit_transform(
             self.account_history.astype('float64'))
 
         obs = np.insert(obs, len(obs), scaled_history[:, -1], axis=0)
-
         obs = np.reshape(obs.astype('float16'), self.obs_shape)
 
         return obs
@@ -176,9 +179,7 @@ class BitcoinTradingEnv(gym.Env):
 
     def step(self, action):
         self._take_action(action)
-
         self.current_step += 1
-
         obs = self._next_observation()
         reward = self._reward()
         done = self._done()
@@ -200,6 +201,18 @@ class BitcoinTradingEnv(gym.Env):
 
             self.viewer.render(self.current_step,
                                self.net_worths, self.benchmarks, self.trades)
+
+        elif mode == 'rgb_array':
+            if self.viewer is None:
+                self.viewer = BitcoinTradingGraph(self.df)
+
+            self.viewer.render(self.current_step,
+                               self.net_worths, self.benchmarks, self.trades)
+            self.viewer.fig.canvas.draw()
+            buf = self.viewer.fig.canvas.tostring_rgb()
+            ncols, nrows = self.viewer.fig.canvas.get_width_height()
+            return np.fromstring(buf, dtype=np.uint8).reshape(nrows, ncols, 3)
+
 
     def close(self):
         if self.viewer is not None:
