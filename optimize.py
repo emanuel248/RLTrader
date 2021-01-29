@@ -20,6 +20,7 @@ import math
 import os
 
 from datetime import datetime
+import time
 
 from tqdm import tqdm, trange
 
@@ -28,7 +29,7 @@ from stable_baselines.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines.common import set_global_seeds, make_vec_env
 from stable_baselines import PPO2, A2C
 
-from env.BitcoinTradingEnv import BitcoinTradingEnv
+from env.BitcoinTradingEnv import BitcoinTradingEnv, DataProvider
 from util.indicators import add_indicators
 
 import warnings
@@ -37,6 +38,17 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
+import argparse
+
+# Instantiate the parser
+parser = argparse.ArgumentParser(description='Optimize bitcoin trading bot')
+parser.add_argument('study', type=str,
+                    help='Name for study')
+parser.add_argument('--overwrite', help='Overwrite existing study')
+parser.add_argument('--envs', type=int,
+                    help='Number of envs to spawn', default=2)
+args = parser.parse_args()
+
 # number of parallel jobs
 n_jobs = 2
 # maximum number of trials for finding the best hyperparams
@@ -44,9 +56,17 @@ n_trials = 100
 # number of test episodes per trial
 n_test_episodes = 3
 # number of evaluations for pruning per trial
-n_evaluations = 6
+n_evaluations = 4
 
-n_envs = 9
+n_envs = args.envs
+
+
+def logtime(func, *args, **kwargs):
+    start_time = time.time()
+    result = func(*args, **kwargs)
+    time_diff = time.time() - start_time
+    print(f'{func.__name__} ran {time_diff} s')
+    return result
 
 
 def make_env(data_frame, env_params, rank, seed=0):
@@ -74,37 +94,34 @@ def optimize_ppo2(trial):
         'ent_coef': trial.suggest_loguniform('ent_coef', 1e-8, 1e-1),
         'cliprange': trial.suggest_uniform('cliprange', 0.1, 0.4),
         'noptepochs': int(trial.suggest_loguniform('noptepochs', 1, 48)),
-        'lam': trial.suggest_uniform('lam', 0.8, 1.)
+        'lam': trial.suggest_uniform('lam', 0.8, 1.),
     }
 
 
 def optimize_agent(trial):
+    start_time = time.time()
     print('Preparing env..')
     env_params = optimize_envs(trial)
 
     train_env = DummyVecEnv(
-        [make_env(train_df, env_params, i) for i in range(n_envs)])
-    #train_env = DummyVecEnv(
-    #    [lambda: BitcoinTradingEnv(train_df,  **env_params)])
-    test_env = SubprocVecEnv(
-        [make_env(test_df, env_params, i) for i in range(n_envs)])
-    #test_env = DummyVecEnv(
-    #    [lambda: BitcoinTradingEnv(test_df, **env_params)])
+        [make_env(train_provider, env_params, i) for i in range(n_envs)])
+    test_env = DummyVecEnv(
+        [make_env(test_provider, env_params, i) for i in range(n_envs)])
 
-    print('..init model..')
+    time_diff =  time.time() - start_time
+    print(f'..init model.. after {time_diff} s')
     model_params = optimize_ppo2(trial)
-    model = PPO2(MlpLnLstmPolicy, train_env, verbose=0, nminibatches=3,
+    model = PPO2(MlpLnLstmPolicy, train_env, policy_kwargs=None, verbose=0, nminibatches=2,
                  tensorboard_log=None, **model_params)
 
     last_reward = -np.inf
     evaluation_interval = int(len(train_df) / n_evaluations)
 
-    print('..env ready')
-    for eval_idx in range(n_evaluations):
+    time_diff = time.time() - start_time
+    print(f'..env ready after {time_diff} s')
+    for episode in range(n_evaluations):
         try:
-            print('start training ', datetime.now())
-            model.learn(evaluation_interval)
-            print('end training ', datetime.now())
+            logtime(model.learn, evaluation_interval)
         except AssertionError:
             raise
 
@@ -117,37 +134,38 @@ def optimize_agent(trial):
 
         obs = test_env.reset()
         step_cnt = 0
-        while n_episodes < n_test_episodes:
-            action, _ = model.predict(obs)
-            obs, reward, done, _ = test_env.step(action)
-            reward_sum += sum(reward)
+        with tqdm() as pbar:
+            while n_episodes < n_test_episodes:
+                action, _ = model.predict(obs)
+                obs, reward, done, _ = test_env.step(action)
+                reward_sum += np.mean(reward)
 
-            if step_cnt % 16 == 0:
-                try:
-                    test_env.render(mode='human')
-                except:
-                    pass
+                if step_cnt % 1024 == 0:
+                    try:
+                        test_env.render(mode='human')
+                    except:
+                        pass
 
-            if all(done):
-                rewards.append(reward_sum)
-                reward_sum = 0.0
-                n_episodes += 1
-                obs = test_env.reset()
-            step_cnt = step_cnt + 1
-
-            trial.report(-1 * last_reward, step_cnt)
-            if trial.should_prune():
-                raise optuna.structs.TrialPruned()
+                if all(done):
+                    rewards.append(reward_sum)
+                    reward_sum = 0.0
+                    n_episodes += 1
+                    
+                    obs = test_env.reset()
+                step_cnt = step_cnt + 1
+                pbar.update(1)
 
         last_reward = np.mean(rewards)
-
+        trial.report(-1 * last_reward, episode)
+        if trial.should_prune():
+            raise optuna.structs.TrialPruned()
 
     return -1 * last_reward
 
 
 def optimize():
     study = optuna.create_study(
-        study_name='ppo2_sortino', storage='sqlite:///params.db', load_if_exists=True,
+        study_name=f'ppo2_{args.study}', storage='sqlite:///params_ppo2.db', load_if_exists=True,
         pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=32, interval_steps=16))
 
     try:
@@ -180,5 +198,8 @@ if __name__ == '__main__':
     train_len = int(len(df) - len(df) * 0.1)
     train_df = df[:train_len]
     test_df = df[train_len:]
+
+    train_provider = DataProvider(train_df)
+    test_provider = DataProvider(test_df)
 
     optimize()

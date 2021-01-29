@@ -14,22 +14,11 @@ from util.benchmarks import buy_and_hodl, rsi_divergence, sma_crossover
 from util.indicators import add_indicators
 
 
-class BitcoinTradingEnv(gym.Env):
-    '''A Bitcoin trading environment for OpenAI gym'''
-    metadata = {'render.modes': ['human', 'system', 'rgb_array', 'none']}
-    viewer = None
-
-    def __init__(self, df, initial_balance=10000, commission=0.0025, reward_func='sortino', **kwargs):
-        super(BitcoinTradingEnv, self).__init__()
-
-        self.initial_balance = initial_balance
-        self.commission = commission
-        self.reward_func = reward_func
-
+class DataProvider:
+    def __init__(self, df, initial_balance=10000, commission=0.0025):
         self.df = df.fillna(method='bfill').reset_index()
         self.stationary_df = log_and_difference(
             self.df, ['Open', 'High', 'Low', 'Close', 'Volume BTC', 'Volume USD'])
-
         self.benchmarks = [
             {
                 'label': 'Buy and HODL',
@@ -44,33 +33,56 @@ class BitcoinTradingEnv(gym.Env):
                 'values': sma_crossover(self.df['Close'], initial_balance, commission)
             }
         ]
+        self.obs_shape = (1, 5 + len(self.df.columns) - 2)
+        self.scaled_parts = dict()
+        self.initial_balance = initial_balance
+        self.commission = commission
+
+    def scaled_part(self, until_idx: int):
+        if f'{until_idx}' in self.scaled_parts:
+            return self.scaled_parts[f'{until_idx}']
+        else:
+            scaler = preprocessing.MinMaxScaler()
+            features = self.stationary_df[self.stationary_df.columns.difference([
+            'index', 'Date'])]
+            scaled = features[:until_idx].values
+            scaled[abs(scaled) == inf] = 0
+            scaled = scaler.fit_transform(scaled.astype('float64'))
+            scaled = pd.DataFrame(scaled, columns=features.columns)
+            self.scaled_parts[f'{until_idx}'] = (scaled, scaler)
+        return self.scaled_parts[f'{until_idx}']
+
+
+class BitcoinTradingEnv(gym.Env):
+    '''A Bitcoin trading environment for OpenAI gym'''
+    metadata = {'render.modes': ['human', 'system', 'rgb_array', 'none']}
+    viewer = None
+
+    def __init__(self, provider: DataProvider, reward_func='sortino', **kwargs):
+        super(BitcoinTradingEnv, self).__init__()
+
+        self.initial_balance = provider.initial_balance
+        self.commission = provider.commission
+        self.reward_func = reward_func
 
         #self.forecast_len = kwargs.get('forecast_len', 10)
         self.forecast_len = kwargs.get('forecast_len', 0)
         self.confidence_interval = kwargs.get('confidence_interval', 0.95)
         #self.obs_shape = (1, 5 + len(self.df.columns) -
         #                  2 + (self.forecast_len * 3))
-        self.obs_shape = (1, 5 + len(self.df.columns) - 2)
+        
 
         # Actions of the format Buy 1/4, Sell 3/4, Hold (amount ignored), etc.
         self.action_space = spaces.Discrete(12)
 
         # Observes the price action, indicators, account action, price forecasts
         self.observation_space = spaces.Box(
-            low=0, high=1, shape=self.obs_shape, dtype=np.float16)
+            low=0, high=1, shape=provider.obs_shape, dtype=np.float16)
         self.trades = []
+        self.provider = provider
 
     def _next_observation(self):
-        scaler = preprocessing.MinMaxScaler()
-
-        features = self.stationary_df[self.stationary_df.columns.difference([
-            'index', 'Date'])]
-
-        scaled = features[:self.current_step + self.forecast_len + 1].values
-        scaled[abs(scaled) == inf] = 0
-        scaled = scaler.fit_transform(scaled.astype('float64'))
-        scaled = pd.DataFrame(scaled, columns=features.columns)
-
+        scaled, scaler = self.provider.scaled_part(self.current_step + self.forecast_len + 1)
         obs = scaled.values[-1]
 
         #past_df = self.stationary_df['Close'][:
@@ -87,12 +99,12 @@ class BitcoinTradingEnv(gym.Env):
             self.account_history.astype('float64'))
 
         obs = np.insert(obs, len(obs), scaled_history[:, -1], axis=0)
-        obs = np.reshape(obs.astype('float16'), self.obs_shape)
+        obs = np.reshape(obs.astype('float16'), self.provider.obs_shape)
 
         return obs
 
     def _current_price(self):
-        return self.df['Close'].values[self.current_step + self.forecast_len] + 0.01
+        return self.provider.df['Close'].values[self.current_step + self.forecast_len] + 0.01
 
     def _take_action(self, action):
         current_price = self._current_price()
@@ -158,7 +170,7 @@ class BitcoinTradingEnv(gym.Env):
         return reward if abs(reward) != inf and not np.isnan(reward) else 0
 
     def _done(self):
-        return self.net_worths[-1] < self.initial_balance / 10 or self.current_step == len(self.df) - self.forecast_len - 1
+        return self.net_worths[-1] < self.initial_balance / 10 or self.current_step == len(self.provider.df) - self.forecast_len - 1
 
     def reset(self):
         self.balance = self.initial_balance
@@ -178,6 +190,7 @@ class BitcoinTradingEnv(gym.Env):
         return self._next_observation()
 
     def step(self, action):
+        #devenv
         self._take_action(action)
         self.current_step += 1
         obs = self._next_observation()
@@ -197,17 +210,17 @@ class BitcoinTradingEnv(gym.Env):
 
         elif mode == 'human':
             if self.viewer is None:
-                self.viewer = BitcoinTradingGraph(self.df)
+                self.viewer = BitcoinTradingGraph(self.provider.df)
 
             self.viewer.render(self.current_step,
-                               self.net_worths, self.benchmarks, self.trades)
+                               self.net_worths, self.provider.benchmarks, self.trades)
 
         elif mode == 'rgb_array':
             if self.viewer is None:
-                self.viewer = BitcoinTradingGraph(self.df)
+                self.viewer = BitcoinTradingGraph(self.provider.df)
 
             self.viewer.render(self.current_step,
-                               self.net_worths, self.benchmarks, self.trades)
+                               self.net_worths, self.provider.benchmarks, self.trades)
             self.viewer.fig.canvas.draw()
             buf = self.viewer.fig.canvas.tostring_rgb()
             ncols, nrows = self.viewer.fig.canvas.get_width_height()
