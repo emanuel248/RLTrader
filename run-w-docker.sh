@@ -22,7 +22,6 @@ docker run \
     --interactive \
     --tty \
     --rm \
-    --cpus "${CPU_LIMIT}" \
     --runtime=nvidia \
     --volume "${CWD}":/code \
     --user=$(id -u) \
@@ -33,6 +32,7 @@ docker run \
     --volume="/etc/shadow:/etc/shadow:ro" \
     --volume="/etc/sudoers.d:/etc/sudoers.d:ro" \
     --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+    --privileged \
     --network host -it \
     "$N" \
     bash $@
