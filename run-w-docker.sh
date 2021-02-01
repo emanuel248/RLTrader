@@ -18,6 +18,8 @@ N="trader-rl-gpu"
 docker build --tag $N -f "$CWD/Dockerfile" "$CWD"
 
 echo "CWD: $CWD - Procs: $CPU_LIMIT Memory: ${MEM_LIMIT}bytes"
+ 
+#    --user=$(id -u) \
 docker run \
     --interactive \
     --tty \
