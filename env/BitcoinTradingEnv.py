@@ -1,4 +1,11 @@
+import logging
+import os
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # FATAL
+logging.getLogger('tensorflow').setLevel(logging.FATAL)
+
 import gym
+import gc
 import pandas as pd
 import numpy as np
 from numpy import inf
@@ -9,6 +16,7 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 from empyrical import sortino_ratio, calmar_ratio, omega_ratio
 from cachetools import LRUCache, cachedmethod
 import operator
+import functools
 
 from render.BitcoinTradingGraph import BitcoinTradingGraph
 from util.stationarization import log_and_difference
@@ -37,13 +45,7 @@ class DataProvider:
                 'values': sma_crossover(self.df['Close'], initial_balance, commission)
             }
         ]
-        self.forecast_len = kwargs.get('forecast_len', 10)
-        #self.forecast_len = kwargs.get('forecast_len', 0)
-        self.confidence_interval = kwargs.get('confidence_interval', 0.95)
 
-        self.obs_shape = (1, 5 + len(self.df.columns) -
-                          2 + (self.forecast_len * 3))
-        #self.obs_shape = (1, 5 + len(self.df.columns) - 2)
         self.initial_balance = initial_balance
         self.commission = commission
         self.scaler_cache = LRUCache(maxsize=16384)
@@ -61,13 +63,14 @@ class DataProvider:
         
 
     @cachedmethod(operator.attrgetter('sarimax_cache'))
-    def sarimax_forecast(self, until_idx: int):
+    def sarimax_forecast(self, until_idx: int, forecast_len: int, confidence_interval):
         past_df = self.stationary_df['Close'][:
                                               until_idx]
-        forecast_model = SARIMAX(past_df.values, enforce_stationarity=False)
+        forecast_model = SARIMAX(past_df.values, enforce_stationarity=False, simple_differencing=True)
         model_fit = forecast_model.fit(method='bfgs', disp=False)
         forecast = model_fit.get_forecast(
-            steps=self.forecast_len, alpha=(1 - self.confidence_interval))
+            steps=forecast_len, alpha=(1 - confidence_interval))
+        
         return (forecast.predicted_mean, forecast.conf_int().flatten())
 
 
@@ -87,45 +90,53 @@ class BitcoinTradingEnv(gym.Env):
         self.action_space = spaces.Discrete(12)
 
         # Observes the price action, indicators, account action, price forecasts
+        self.provider = provider        
+        self.forecast_len = kwargs.get('forecast_len', 10)
+        self.confidence_interval = kwargs.get('confidence_interval', 0.95)
+
+        self.obs_shape = (1, 5 + len(self.provider.df.columns) -
+                          2 + (self.forecast_len * 3))
+        
         self.observation_space = spaces.Box(
-            low=0, high=1, shape=provider.obs_shape, dtype=np.float16)
+            low=0, high=1, shape=self.obs_shape, dtype=np.float16)
         self.trades = []
-        self.provider = provider
 
     def _next_observation(self):
-        until_idx = self.current_step + self.provider.forecast_len + 1
+        until_idx = self.current_step + self.forecast_len + 1
 
         scale_, min_ = self.provider.scaled_part(until_idx)
         features = self.provider.stationary_df[self.provider.stationary_df.columns.difference([
         'index', 'Date'])]
         scaled = features[:until_idx].values
         scaled[abs(scaled) == inf] = 0
+        
+
+        # makes no sense to move to gpu, already fast
         scaled *= scale_
         scaled += min_
         scaled = pd.DataFrame(scaled, columns=features.columns)
 
-        # scaled, scaler = self.provider.scaled_part(until_idx)
         obs = scaled.values[-1]
 
-        predicted_mean, forecast_conf = self.provider.sarimax_forecast(until_idx)
+        predicted_mean, forecast_conf = self.provider.sarimax_forecast(until_idx, self.forecast_len, self.confidence_interval)
 
         obs = np.insert(obs, len(obs), predicted_mean, axis=0)
         obs = np.insert(obs, len(obs), forecast_conf, axis=0)
-
 
         scaler = preprocessing.MinMaxScaler()
         scaled_history = scaler.fit_transform(
             self.account_history.astype('float64'))
 
         obs = np.insert(obs, len(obs), scaled_history[:, -1], axis=0)
-        obs = np.reshape(obs.astype('float16'), self.provider.obs_shape)
+        obs = np.reshape(obs.astype('float16'), self.obs_shape)
 
         return obs
 
     def _current_price(self):
-        return self.provider.df['Close'].values[self.current_step + self.provider.forecast_len] + 0.01
+        return self.provider.df['Close'].values[self.current_step + self.forecast_len] + 0.01
 
     def _take_action(self, action):
+        action = action[0]
         current_price = self._current_price()
         action_type = int(action / 4)
         amount = 1 / (action % 4 + 1)
@@ -168,7 +179,7 @@ class BitcoinTradingEnv(gym.Env):
         ], axis=1)
 
     def _reward(self):
-        length = min(self.current_step, self.provider.forecast_len)
+        length = min(self.current_step, self.forecast_len)
         returns = np.diff(self.net_worths)[-length:]
 
         if np.count_nonzero(returns) < 1:
@@ -189,7 +200,7 @@ class BitcoinTradingEnv(gym.Env):
         return reward if abs(reward) != inf and not np.isnan(reward) else 0
 
     def _done(self):
-        return self.net_worths[-1] < self.initial_balance / 10 or self.current_step == len(self.provider.df) - self.provider.forecast_len - 1
+        return self.net_worths[-1] < self.initial_balance / 3 or self.current_step >= len(self.provider.df) - self.forecast_len - 1
 
     def reset(self):
         self.balance = self.initial_balance

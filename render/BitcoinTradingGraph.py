@@ -10,7 +10,7 @@ import matplotlib.ticker as mticker
 
 style.use('ggplot')
 register_matplotlib_converters()
-matplotlib.use('tkagg')
+#matplotlib.use('tkagg')
 
 VOLUME_CHART_HEIGHT = 0.33
 
@@ -22,6 +22,7 @@ class BitcoinTradingGraph:
         self.df = df
         self.cleft = cleft
         self.cright = cright
+        self.df = df.copy()
         self.df['Time'] = self.df['Date'].apply(
             lambda x: datetime.strptime(x, '%Y-%m-%d %I-%p'))
         self.df = self.df.sort_values('Time')

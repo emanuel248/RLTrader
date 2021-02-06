@@ -2,8 +2,8 @@ from ta import add_all_ta_features
 
 # using
 # https://technical-analysis-library-in-python.readthedocs.io/en/latest
-def add_indicators(df):
+def add_indicators(df, currency):
     df = add_all_ta_features(
-        df, open="Open", high="High", low="Low", close="Close", volume="Volume BTC", fillna=True)
+        df, open="Open", high="High", low="Low", close="Close", volume=f"Volume {currency}", fillna=True)
 
     return df

@@ -13,6 +13,8 @@ from tensorflow.keras.backend import clear_session
 from tensorflow.python.framework.ops import disable_eager_execution
 
 import optuna
+import tracemalloc as tr
+import multiprocessing
 
 import pandas as pd
 import numpy as np
@@ -20,16 +22,16 @@ import math
 
 import os
 import gc
+import cv2
 
 from datetime import datetime
 import time
 
 from tqdm import tqdm, trange
 
-from stable_baselines.common.policies import MlpLnLstmPolicy
-from stable_baselines.common.vec_env import DummyVecEnv, SubprocVecEnv
-from stable_baselines.common import set_global_seeds, make_vec_env
-from stable_baselines import PPO2, A2C
+from baselines.ppo2 import ppo2
+from baselines.common.vec_env import VecFrameStack, VecNormalize, DummyVecEnv, SubprocVecEnv
+from baselines.common import set_global_seeds
 
 from env.BitcoinTradingEnv import BitcoinTradingEnv, DataProvider
 from util.indicators import add_indicators
@@ -53,6 +55,9 @@ parser.add_argument('--balance', type=int,
                     help='Initial', default=10000)
 parser.add_argument('--envs', type=int,
                     help='Number of envs to spawn', default=2)
+parser.add_argument("--test", type=bool)
+parser.add_argument("--memtest", type=bool)
+parser.add_argument("--modeltest", type=bool)
 args = parser.parse_args()
 
 # number of parallel jobs
@@ -94,9 +99,9 @@ def optimize_envs(trial):
 
 def optimize_ppo2(trial):
     return {
-        'n_steps': int(trial.suggest_loguniform('n_steps', 16, 4096)),
+        'nsteps': int(trial.suggest_loguniform('nsteps', 1024, 4096)),
         'gamma': trial.suggest_loguniform('gamma', 0.9, 0.9999),
-        'learning_rate': trial.suggest_loguniform('learning_rate', 1e-5, 1.),
+        'lr': trial.suggest_loguniform('learning_rate', 1e-5, 1.),
         'ent_coef': trial.suggest_loguniform('ent_coef', 1e-8, 1e-1),
         'cliprange': trial.suggest_uniform('cliprange', 0.1, 0.4),
         'noptepochs': int(trial.suggest_loguniform('noptepochs', 1, 48)),
@@ -108,9 +113,6 @@ def optimize_agent(trial):
     start_time = time.time()
     print('Preparing/cleaning env..')
 
-    clear_session()
-    disable_eager_execution() 
-
     env_params = optimize_envs(trial)
 
     train_env = SubprocVecEnv(
@@ -120,60 +122,65 @@ def optimize_agent(trial):
 
     time_diff =  time.time() - start_time
     model_params = optimize_ppo2(trial)
-    model = PPO2(MlpLnLstmPolicy, train_env, policy_kwargs=None, verbose=0, nminibatches=2,
-                 tensorboard_log=None, **model_params)
 
     last_reward = -np.inf
     evaluation_interval = int(len(train_df) / n_evaluations)
 
     time_diff = time.time() - start_time
     print(f'..env ready after {time_diff} s')
-    for episode in range(n_evaluations):
-        print('starting training..')
-        try:
-            model.learn(evaluation_interval)
-        except AssertionError:
-            raise
+    with tqdm(total=n_test_episodes, ascii=True) as ep_bar:
+        with tqdm(total=len(test_df), ascii=True) as pbar:
+            for episode in trange(n_evaluations):
+                ep_bar.set_description_str(desc='training')
+                model = ppo2.learn(network='lnlstm', total_timesteps=evaluation_interval, env=train_env, **model_params)
+                ep_bar.set_description_str(desc='eval')
 
-        rewards = []
-        n_episodes, reward_sum = 0, 0.0
+                rewards = []
+                n_episodes, reward_sum = 0, 0.0
 
-        obs = test_env.reset()
-        step_cnt = 0
-        with tqdm() as pbar:
-            while n_episodes < n_test_episodes:
-                action, _ = model.predict(obs)
-                obs, reward, done, _ = test_env.step(action)
-                reward_sum += np.mean(reward)
+                obs = test_env.reset()
+                step_cnt = 0
+                
+                state = model.initial_state if hasattr(model, 'initial_state') else None
+                while n_episodes < n_test_episodes:
+                    if state is not None:
+                        actions, _, state, _ = model.step(obs)
+                    else:
+                        actions, _, _, _ = model.step(obs)
+                    obs, reward, done, _ = test_env.step(actions.numpy())
+                    reward_sum += np.mean(reward)
 
-                if step_cnt % 1524 == 0:
-                    try:
-                        test_env.render(mode='human')
-                    except:
-                        pass
+                    #if step_cnt % 1524 == 0:
+                    #    try:
+                    #        test_env.render(mode='human')
+                    #    except:
+                    #        pass
 
-                if all(done):
-                    rewards.append(reward_sum)
-                    reward_sum = 0.0
-                    n_episodes += 1
-                    
-                    obs = test_env.reset()
-                step_cnt = step_cnt + 1
-                pbar.update(1)
+                    if any(done):
+                        rewards.append(reward_sum)
+                        reward_sum = 0.0
+                        n_episodes += 1
+                        ep_bar.update(1)
+                        pbar.reset()
+                        obs = test_env.reset()
 
-        last_reward = np.mean(rewards)
-        trial.report(-1 * last_reward, episode)
-        if trial.should_prune():
-            del model
-            raise optuna.structs.TrialPruned()
+                    pbar.update(1)
+                    step_cnt = step_cnt + 1
+                ep_bar.reset()
+
+                last_reward = np.mean(rewards)
+                trial.report(last_reward, episode)
+                if trial.should_prune():
+                    del model
+                    raise optuna.structs.TrialPruned()
 
     del model
-    return -1 * last_reward
+    return last_reward
 
 
 def optimize():
     study = optuna.create_study(
-        study_name=f'ppo2_{args.study}', storage='sqlite:///params_ppo2.db', load_if_exists=True,
+        study_name=f'ppo2_{args.study}', storage='sqlite:///params_ppo2.db', load_if_exists=True, direction='maximize', 
         pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=32, interval_steps=16))
 
     try:
@@ -200,14 +207,37 @@ if __name__ == '__main__':
     df = pd.read_csv(args.dataset)
     df = df.drop(['Symbol'], axis=1)
     df = df.sort_values(['Date'])
-    df = add_indicators(df.reset_index())
+    df = add_indicators(df.reset_index(), currency=args.cleft)
     print('..done')
 
     train_len = int(len(df) - len(df) * 0.2)
     train_df = df[:train_len]
     test_df = df[train_len:]
 
+
     train_provider = DataProvider(train_df, cur_left=args.cleft, cur_right=args.cright, initial_balance=args.balance)
     test_provider = DataProvider(test_df, cur_left=args.cleft, cur_right=args.cright, initial_balance=args.balance)
 
-    optimize()
+    if args.test:
+        print('Testing runtime speed..')
+        test_env_runtime = BitcoinTradingEnv(test_provider,  {})
+        start_time = time.time()
+        obs = test_env_runtime.reset()
+        for _ in trange(1200):
+            obs, reward, done, _ = test_env_runtime.step(0)
+        time_diff = time.time() - start_time
+        print(f'uncached test ran {time_diff} s')
+        start_time = time.time()
+        obs = test_env_runtime.reset()
+        for _ in trange(1200):
+            obs, reward, done, _ = test_env_runtime.step(0)
+        time_diff = time.time() - start_time
+        print(f'cached test ran {time_diff} s')
+    elif args.modeltest:
+        start_time = time.time()
+        test_env_runtime = DummyVecEnv([make_env(test_provider, {}, i) for i in range(4)])
+        ppo2.learn(network='mlp', total_timesteps=1000, env=test_env_runtime)
+        time_diff = time.time() - start_time
+        print(f'model test ran {time_diff} s')
+    else:
+        optimize()

@@ -15,4 +15,4 @@ empyrical
 tqdm
 ta
 cachetools
-numpy==1.16.4
+pmdarima
