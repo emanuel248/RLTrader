@@ -79,12 +79,13 @@ class BitcoinTradingEnv(gym.Env):
     metadata = {'render.modes': ['human', 'system', 'rgb_array', 'none']}
     viewer = None
 
-    def __init__(self, provider: DataProvider, reward_func='sortino', **kwargs):
+    def __init__(self, provider: DataProvider, reward_func='sortino', index=0, **kwargs):
         super(BitcoinTradingEnv, self).__init__()
 
         self.initial_balance = provider.initial_balance
         self.commission = provider.commission
         self.reward_func = reward_func
+        self.index = index
 
         # Actions of the format Buy 1/4, Sell 3/4, Hold (amount ignored), etc.
         self.action_space = spaces.Discrete(12)
@@ -217,6 +218,10 @@ class BitcoinTradingEnv(gym.Env):
         ])
         self.trades = []
 
+        ## truncate log file
+        f = open(f'{self.provider.cur_left}{self.provider.cur_right}_{self.index}_log.csv', 'w')
+        f.close()
+
         return self._next_observation()
 
     def step(self, action):
@@ -226,6 +231,10 @@ class BitcoinTradingEnv(gym.Env):
         obs = self._next_observation()
         reward = self._reward()
         done = self._done()
+
+        # logging
+        with open(f'{self.provider.cur_left}{self.provider.cur_right}_{self.index}_log.csv', 'a') as f:
+                f.write(f'{self.current_step},{self.net_worths[-1]},{self.provider.initial_balance},{self._current_price()}\n')
 
         return obs, reward, done, {}
 
@@ -237,6 +246,7 @@ class BitcoinTradingEnv(gym.Env):
             print(
                 'Sold: ' + str(self.account_history[4][self.current_step]))
             print('Net worth: ' + str(self.net_worths[-1]))
+            
 
         elif mode == 'human':
             if self.viewer is None:

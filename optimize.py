@@ -82,7 +82,7 @@ def logtime(func, *args, **kwargs):
 
 def make_env(data_frame, env_params, rank, seed=0):
     def _init():
-        env = BitcoinTradingEnv(data_frame,  **env_params)
+        env = BitcoinTradingEnv(data_frame, index=rank, **env_params)
         env.seed(seed + rank)
         return env
 
@@ -92,19 +92,22 @@ def make_env(data_frame, env_params, rank, seed=0):
 def optimize_envs(trial):
     return {
         'reward_func': 'sortino',
-        'forecast_len': int(trial.suggest_loguniform('forecast_len', 1, 20)),
-        'confidence_interval': trial.suggest_uniform('confidence_interval', 0.7, 0.99),
+        #'forecast_len': int(trial.suggest_loguniform('forecast_len', 1, 20)),
+        'forecast_len': 3,
+        #'confidence_interval': trial.suggest_uniform('confidence_interval', 0.7, 0.99),
+        'confidence_interval': 0.9,
     }
 
 
 def optimize_ppo2(trial):
     return {
-        'nsteps': int(trial.suggest_loguniform('nsteps', 1024, 4096)),
-        'gamma': trial.suggest_loguniform('gamma', 0.9, 0.9999),
+        'nsteps': int(trial.suggest_loguniform('nsteps', 16, 2048)),
+        #'gamma': trial.suggest_loguniform('gamma', 0.9, 0.9999),
+        'gamma': 0.99,
         'lr': trial.suggest_loguniform('learning_rate', 1e-5, 1.),
         'ent_coef': trial.suggest_loguniform('ent_coef', 1e-8, 1e-1),
         'cliprange': trial.suggest_uniform('cliprange', 0.1, 0.4),
-        'noptepochs': int(trial.suggest_loguniform('noptepochs', 1, 48)),
+        #'noptepochs': int(trial.suggest_loguniform('noptepochs', 1, 48)),
         'lam': trial.suggest_uniform('lam', 0.8, 1.),
     }
 
@@ -236,7 +239,7 @@ if __name__ == '__main__':
     elif args.modeltest:
         start_time = time.time()
         test_env_runtime = DummyVecEnv([make_env(test_provider, {}, i) for i in range(4)])
-        ppo2.learn(network='mlp', total_timesteps=1000, env=test_env_runtime)
+        ppo2.learn(network='lnlstm', total_timesteps=1000, env=test_env_runtime, nsteps=16)
         time_diff = time.time() - start_time
         print(f'model test ran {time_diff} s')
     else:
